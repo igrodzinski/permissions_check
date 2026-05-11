@@ -29,47 +29,57 @@ def run_extraction(target_model_name, users_map):
             edge.update(properties)
         edges.append(edge)
 
-    logger.info(f"Extracting for model: {target_model_name}")
+    logger.info(f"Extracting for model(s): {target_model_name}")
 
     # 1. Map Model -> Explores -> Access Grants
     logger.info("Fetching LookML models...")
     models = sdk.all_lookml_models(fields="name,explores")
-    target_model = next((m for m in models if m.name == target_model_name), None)
-
-    if not target_model:
-        logger.error(f"Model '{target_model_name}' not found.")
-        return
-
-    model_node = add_node(target_model.name, target_model.name, "model")
+    
+    if target_model_name != "all":
+        target_models = [m for m in models if m.name == target_model_name]
+        if not target_models:
+            logger.error(f"Model '{target_model_name}' not found.")
+            return
+    else:
+        target_models = models
 
     explores_set = set()
-    for explore in target_model.explores or []:
-        explore_id = f"{target_model.name}_{explore.name}"
-        explore_node = add_node(explore_id, explore.name, "explore")
-        add_edge(model_node, explore_node, "has_explore")
-        explores_set.add(explore.name)
+    target_model_names = {m.name for m in target_models}
 
-        try:
-            explore_details = sdk.lookml_model_explore(
-                lookml_model_name=target_model.name,
-                explore_name=explore.name,
-                fields="name,required_access_grants"
-            )
+    for target_model in target_models:
+        model_node = add_node(target_model.name, target_model.name, "model")
 
-            for grant in explore_details.required_access_grants or []:
-                grant_node = add_node(grant, grant, "access_grant")
-                add_edge(explore_node, grant_node, "requires_access_grant")
-        except looker_sdk.error.SDKError as e:
-            logger.warning(f"Could not fetch details for explore {explore.name}: {e}")
+        for explore in target_model.explores or []:
+            explore_id = f"{target_model.name}_{explore.name}"
+            explore_node = add_node(explore_id, explore.name, "explore")
+            add_edge(model_node, explore_node, "has_explore")
+            explores_set.add(explore_id)
+
+            try:
+                explore_details = sdk.lookml_model_explore(
+                    lookml_model_name=target_model.name,
+                    explore_name=explore.name,
+                    fields="name,required_access_grants"
+                )
+
+                for grant in explore_details.required_access_grants or []:
+                    grant_node = add_node(grant, grant, "access_grant")
+                    add_edge(explore_node, grant_node, "requires_access_grant")
+            except looker_sdk.error.SDKError as e:
+                logger.warning(f"Could not fetch details for explore {explore.name} in model {target_model.name}: {e}")
 
     # 2. Fetch all dashboards and map to explores & folders using System Activity
     logger.info("Fetching Dashboards via System Activity...")
     try:
+        filters = {}
+        if target_model_name != "all":
+            filters["query.model"] = target_model_name
+
         sa_query = looker_sdk.models.WriteQuery(
             model="system__activity",
             view="dashboard",
             fields=["dashboard.id", "dashboard.title", "dashboard.folder_id", "query.model", "query.view"],
-            filters={"query.model": target_model_name}
+            filters=filters
         )
         response_json = sdk.run_inline_query(result_format="json", body=sa_query)
         sa_data = json.loads(response_json)
@@ -81,14 +91,15 @@ def run_extraction(target_model_name, users_map):
             q_model = row.get("query.model")
             q_view = row.get("query.view")
 
-            if d_id and q_model == target_model_name and q_view in explores_set:
-                dash_node = add_node(d_id, d_title, "dashboard")
-                explore_node_id = f"{target_model_name}_{q_view}"
-                add_edge(explore_node_id, dash_node, "used_in_dashboard")
+            if d_id and q_model in target_model_names:
+                explore_node_id = f"{q_model}_{q_view}"
+                if explore_node_id in explores_set:
+                    dash_node = add_node(d_id, d_title, "dashboard")
+                    add_edge(explore_node_id, dash_node, "used_in_dashboard")
 
-                if d_folder:
-                    folder_node = add_node(d_folder, f"Folder {d_folder}", "folder")
-                    add_edge(dash_node, folder_node, "in_folder")
+                    if d_folder:
+                        folder_node = add_node(d_folder, f"Folder {d_folder}", "folder")
+                        add_edge(dash_node, folder_node, "in_folder")
     except Exception as e:
         logger.warning(f"Failed to query System Activity for dashboards: {e}")
 
@@ -102,9 +113,12 @@ def run_extraction(target_model_name, users_map):
     logger.info("Fetching Model Sets and Roles...")
     model_sets = sdk.all_model_sets()
     for mset in model_sets:
-        if target_model_name in (mset.models or []):
+        # Check if the model set includes any of our target models
+        included_models = [m for m in (mset.models or []) if m in target_model_names]
+        if included_models:
             mset_node = add_node(mset.id, mset.name, "model_set")
-            add_edge(mset_node, model_node, "includes_model")
+            for m in included_models:
+                add_edge(mset_node, f"model_{m}", "includes_model")
 
     roles = sdk.all_roles()
     for role in roles:
@@ -196,7 +210,7 @@ def run_extraction(target_model_name, users_map):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Looker Permissions Graph Extractor")
-    parser.add_argument("model", help="Target LookML model name to extract (e.g., 'mobile')")
+    parser.add_argument("--model", default="all", help="Target LookML model name to extract (e.g., 'mobile'). Default is 'all'.")
     parser.add_argument("--users_map", action="store_true", help="Include users in the map (True/False)")
     args = parser.parse_args()
 
