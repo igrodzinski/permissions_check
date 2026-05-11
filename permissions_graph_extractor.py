@@ -6,7 +6,7 @@ import argparse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def run_extraction(target_model_name, users_map):
+def run_extraction(target_model_name, users_map=False, show_users_in_groups=False, show_groups_in_groups=False):
     # INSTRUCTION FROM USER:
     path_api = "" # Uzupełnione ręcznie
     sdk = looker_sdk.init40(path_api)
@@ -74,6 +74,8 @@ def run_extraction(target_model_name, users_map):
 
     # 2. Fetch all dashboards and map to explores & folders using System Activity
     logger.info("Fetching Dashboards via System Activity...")
+    folder_to_dashboards = {}
+    
     try:
         filters = {}
         if target_model_name != "all":
@@ -102,8 +104,10 @@ def run_extraction(target_model_name, users_map):
                     add_edge(explore_node_id, dash_node, "used_in_dashboard")
 
                     if d_folder:
-                        folder_node = add_node(d_folder, f"Folder {d_folder}", "folder")
-                        add_edge(dash_node, folder_node, "in_folder")
+                        if d_folder not in folder_to_dashboards:
+                            folder_to_dashboards[d_folder] = []
+                        if d_id not in folder_to_dashboards[d_folder]:
+                            folder_to_dashboards[d_folder].append(d_id)
     except Exception as e:
         logger.warning(f"Failed to query System Activity for dashboards: {e}")
 
@@ -141,27 +145,54 @@ def run_extraction(target_model_name, users_map):
         except Exception as e:
             logger.warning(f"Could not fetch groups for role {role.name}: {e}")
 
-    # 5. Folders and access
-    logger.info("Fetching Folder Access...")
-    folder_ids = [node["id"].split("_")[1] for node in nodes.values() if node["type"] == "folder"]
-    for folder_id in folder_ids:
+    # 5. Dashboard access mapping directly via Folders
+    logger.info("Fetching Folder Access to link Groups directly to Dashboards...")
+    for folder_id, dash_ids in folder_to_dashboards.items():
         try:
             folder = sdk.folder(folder_id)
             content_meta_id = folder.content_metadata_id
             access_list = sdk.all_content_metadata_accesses(content_metadata_id=content_meta_id)
-            folder_node = f"folder_{folder_id}"
 
             for access in access_list:
                 if access.group_id:
                     group_node = add_node(access.group_id, f"Group {access.group_id}", "group")
-                    add_edge(group_node, folder_node, "has_folder_access")
+                    for d_id in dash_ids:
+                        add_edge(group_node, f"dashboard_{d_id}", "has_dashboard_access")
                 elif access.user_id and users_map:
                     user_node = add_node(access.user_id, f"User {access.user_id}", "user")
-                    add_edge(user_node, folder_node, "has_folder_access")
+                    for d_id in dash_ids:
+                        add_edge(user_node, f"dashboard_{d_id}", "has_dashboard_access")
         except Exception as e:
             logger.warning(f"Could not fetch access for folder {folder_id}: {e}")
 
-    # 6. Users map
+    # 6. Users in Groups (Inline mapping)
+    if show_users_in_groups:
+        logger.info("Fetching users for groups...")
+        # Get all current group IDs
+        group_ids = [node["id"].split("_")[1] for node in nodes.values() if node["type"] == "group"]
+        for group_id in group_ids:
+            try:
+                users = sdk.all_group_users(group_id=int(group_id))
+                user_names = [u.display_name or u.email or f"User {u.id}" for u in users]
+                if user_names:
+                    nodes[f"group_{group_id}"]["members"] = user_names
+            except Exception as e:
+                logger.warning(f"Could not fetch users for group {group_id}: {e}")
+
+    # 7. Groups in Groups
+    if show_groups_in_groups:
+        logger.info("Fetching group hierarchy (groups in groups)...")
+        group_ids = [node["id"].split("_")[1] for node in nodes.values() if node["type"] == "group"]
+        for group_id in group_ids:
+            try:
+                subgroups = sdk.all_group_groups(group_id=int(group_id))
+                for sg in subgroups:
+                    sg_node = add_node(sg.id, sg.name, "group")
+                    add_edge(f"group_{group_id}", sg_node, "contains_group")
+            except Exception as e:
+                logger.warning(f"Could not fetch subgroups for group {group_id}: {e}")
+
+    # 8. Users map (separate nodes)
     if users_map:
         logger.info("Fetching Users...")
         users = sdk.all_users()
@@ -179,7 +210,7 @@ def run_extraction(target_model_name, users_map):
                     role_node = add_node(rid, f"Role {rid}", "role")
                     add_edge(user_node, role_node, "has_role")
 
-    # 7. Access Grants Mapping via User Attributes
+    # 9. Access Grants Mapping via User Attributes
     logger.info("Fetching User Attributes to map Access Grant satisfactions...")
     try:
         user_attributes = sdk.all_user_attributes()
@@ -194,10 +225,6 @@ def run_extraction(target_model_name, users_map):
                         group_node = add_node(gv.group_id, f"Group {gv.group_id}", "group")
                         add_edge(group_node, ua_node, "has_attribute_value", {"value": gv.value})
                 
-                # User mappings (if users_map enabled)
-                if users_map:
-                    # Note: Fetching all user attribute values for all users can be slow.
-                    pass
     except Exception as e:
         logger.warning(f"Could not fetch User Attributes: {e}")
 
@@ -215,7 +242,9 @@ def run_extraction(target_model_name, users_map):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Looker Permissions Graph Extractor")
     parser.add_argument("--model", default="all", help="Target LookML model name to extract (e.g., 'mobile'). Default is 'all'.")
-    parser.add_argument("--users_map", action="store_true", help="Include users in the map (True/False)")
+    parser.add_argument("--users_map", action="store_true", help="Include users in the map as separate nodes (True/False)")
+    parser.add_argument("--show_users_in_groups", action="store_true", help="Append user names to Group nodes")
+    parser.add_argument("--show_groups_in_groups", action="store_true", help="Map nested group relationships")
     args = parser.parse_args()
 
-    run_extraction(args.model, args.users_map)
+    run_extraction(args.model, args.users_map, args.show_users_in_groups, args.show_groups_in_groups)
