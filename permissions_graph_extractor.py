@@ -59,14 +59,18 @@ def run_extraction(target_model_name, users_map):
                 explore_details = sdk.lookml_model_explore(
                     lookml_model_name=target_model.name,
                     explore_name=explore.name,
-                    fields="name,required_access_grants"
+                    fields="name,required_access_grants" # Note: older Looker SDKs might ignore this field if not present in the model
                 )
 
-                for grant in explore_details.required_access_grants or []:
+                # Use getattr to prevent AttributeError if the SDK version does not support required_access_grants
+                grants = getattr(explore_details, "required_access_grants", [])
+                for grant in grants:
                     grant_node = add_node(grant, grant, "access_grant")
                     add_edge(explore_node, grant_node, "requires_access_grant")
             except looker_sdk.error.SDKError as e:
                 logger.warning(f"Could not fetch details for explore {explore.name} in model {target_model.name}: {e}")
+            except AttributeError as e:
+                logger.warning(f"AttributeError while parsing explore {explore.name}: {e}. Ensure your Looker SDK supports this property.")
 
     # 2. Fetch all dashboards and map to explores & folders using System Activity
     logger.info("Fetching Dashboards via System Activity...")
