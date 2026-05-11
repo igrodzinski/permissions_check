@@ -157,11 +157,11 @@ def run_extraction(target_model_name, users_map=False, show_users_in_groups=Fals
                 if access.group_id:
                     group_node = add_node(access.group_id, f"Group {access.group_id}", "group")
                     for d_id in dash_ids:
-                        add_edge(group_node, f"dashboard_{d_id}", "has_dashboard_access")
+                        add_edge(f"dashboard_{d_id}", group_node, "has_dashboard_access")
                 elif access.user_id and users_map:
                     user_node = add_node(access.user_id, f"User {access.user_id}", "user")
                     for d_id in dash_ids:
-                        add_edge(user_node, f"dashboard_{d_id}", "has_dashboard_access")
+                        add_edge(f"dashboard_{d_id}", user_node, "has_dashboard_access")
         except Exception as e:
             logger.warning(f"Could not fetch access for folder {folder_id}: {e}")
 
