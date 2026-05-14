@@ -5,7 +5,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def build_sankey(input_file: str, output_file: str, include_users: bool):
+def build_sankey(input_file: str, output_file: str, include_users: bool, target_models: list = None):
     try:
         with open(input_file, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
@@ -43,7 +43,12 @@ def build_sankey(input_file: str, output_file: str, include_users: bool):
     dash_names = {}
     for d in raw_data.get("dashboards", []):
         d_id = str(d.get("id"))
-        dash_to_folder[d_id] = str(d.get("folder_id"))
+        
+        # Ochrona przed rzutowaniem None na string "None"
+        f_id = d.get("folder_id") or d.get("folder", {}).get("id")
+        if f_id:
+            dash_to_folder[d_id] = str(f_id)
+            
         dash_names[d_id] = d.get("title", f"Dash {d_id}")
         
     # Słownik dostępów folderów
@@ -56,6 +61,11 @@ def build_sankey(input_file: str, output_file: str, include_users: bool):
     # 1. Models & Explores
     for model in raw_data.get("models", []):
         model_name = model.get("name")
+        
+        # Filtrowanie po wybranych modelach
+        if target_models and model_name not in target_models:
+            continue
+            
         model_idx = get_node_index(f"model_{model_name}", model_name, "model")
         
         # Pobieramy explores dla danego modelu ze słownika `explores` lub `model.explores`
@@ -82,8 +92,12 @@ def build_sankey(input_file: str, output_file: str, include_users: bool):
             explore_idx = node_indices[explore_id]
             
             d_title = dash_names.get(dash_id, sa_row.get("dashboard.title", f"Dash {dash_id}"))
-            d_folder = dash_to_folder.get(dash_id, str(sa_row.get("dashboard.folder_id", "")))
             
+            d_folder = dash_to_folder.get(dash_id)
+            if not d_folder:
+                sa_folder = sa_row.get("dashboard.folder_id")
+                d_folder = str(sa_folder) if sa_folder else ""
+                
             dash_node_id = f"dash_{dash_id}"
             dash_idx = get_node_index(dash_node_id, d_title, "dashboard")
             
@@ -136,6 +150,7 @@ if __name__ == "__main__":
     parser.add_argument("--input", default="raw_looker_data.json", help="Ścieżka do pliku wejściowego (domyślnie raw_looker_data.json)")
     parser.add_argument("--output", default="sankey_data.json", help="Ścieżka do zapisu (domyślnie sankey_data.json)")
     parser.add_argument("--include_users", action="store_true", help="Dodaje na końcu strumienie łączące Grupy z poszczególnymi Użytkownikami")
+    parser.add_argument("--models", nargs="+", help="Filtruj wygenerowany wykres Sankeya dla wybranych modeli (np. --models model1 model2)")
     args = parser.parse_args()
 
-    build_sankey(args.input, args.output, args.include_users)
+    build_sankey(args.input, args.output, args.include_users, args.models)
