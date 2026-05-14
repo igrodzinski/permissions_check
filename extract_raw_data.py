@@ -4,6 +4,7 @@ import json
 import logging
 import argparse
 from typing import Any
+from looker_sdk.sdk.api40.models import WriteQuery
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -76,7 +77,7 @@ def extract_raw_data(target_model_name: str):
         if target_model_name != "all":
             filters["query.model"] = target_model_name
 
-        sa_query = looker_sdk.models.WriteQuery(
+        sa_query = WriteQuery(
             model="system__activity",
             view="dashboard",
             fields=["dashboard.id", "dashboard.title", "dashboard.folder_id", "query.model", "query.view"],
