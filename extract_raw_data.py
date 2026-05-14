@@ -1,4 +1,5 @@
 import looker_sdk
+import api
 import json
 import logging
 import argparse
@@ -20,10 +21,7 @@ def serialize_looker_obj(obj: Any) -> Any:
         return obj
 
 def extract_raw_data(target_model_name: str):
-    # INSTRUCTION FROM USER:
-    path_api = "" # Uzupełnione ręcznie
-    logger.info("Inicjalizacja Looker SDK...")
-    sdk = looker_sdk.init40(path_api)
+    logger.info("Inicjalizacja przez zewnętrzny plik api...")
     
     raw_data = {
         "metadata": {
@@ -43,7 +41,7 @@ def extract_raw_data(target_model_name: str):
 
     # 1. Models and Explores
     logger.info("Pobieranie modeli (Models)...")
-    models = sdk.all_lookml_models(fields="name,explores")
+    models = api.sdk.all_lookml_models(fields="name,explores")
     
     if target_model_name != "all":
         target_models = [m for m in models if m.name == target_model_name]
@@ -60,7 +58,7 @@ def extract_raw_data(target_model_name: str):
         model_explores = []
         for explore in model.explores or []:
             try:
-                explore_details = sdk.lookml_model_explore(
+                explore_details = api.sdk.lookml_model_explore(
                     lookml_model_name=model.name,
                     explore_name=explore.name,
                     fields="name,model_name,required_access_grants"
@@ -83,14 +81,14 @@ def extract_raw_data(target_model_name: str):
             fields=["dashboard.id", "dashboard.title", "dashboard.folder_id", "query.model", "query.view"],
             filters=filters
         )
-        response_json = sdk.run_inline_query(result_format="json", body=sa_query)
+        response_json = api.sdk.run_inline_query(result_format="json", body=sa_query)
         raw_data["system_activity_dashboards"] = json.loads(response_json)
     except Exception as e:
         logger.warning(f"Błąd podczas pobierania System Activity: {e}")
 
     # 3. Dashboards
     logger.info("Pobieranie Dashboardów...")
-    dashboards = sdk.all_dashboards(fields="id,title,folder_id")
+    dashboards = api.sdk.all_dashboards(fields="id,title,folder_id")
     # Zoptymalizuj zapis - zrzucamy tylko te, które się pojawiły w modelu (lub wszystkie)
     if target_model_name != "all":
         sa_dash_ids = {str(d.get("dashboard.id")) for d in raw_data["system_activity_dashboards"]}
@@ -101,33 +99,33 @@ def extract_raw_data(target_model_name: str):
 
     # 4. Users and Groups
     logger.info("Pobieranie Użytkowników i Grup...")
-    raw_data["users"] = serialize_looker_obj(sdk.all_users(fields="id,email,display_name,group_ids,role_ids"))
-    raw_data["groups"] = serialize_looker_obj(sdk.all_groups(fields="id,name"))
+    raw_data["users"] = serialize_looker_obj(api.sdk.all_users(fields="id,email,display_name,group_ids,role_ids"))
+    raw_data["groups"] = serialize_looker_obj(api.sdk.all_groups(fields="id,name"))
 
     # 5. Access Grants Mapping (User Attributes)
     logger.info("Pobieranie Atrybutów Użytkownika dla Access Grants...")
-    user_attributes = sdk.all_user_attributes(fields="id,name,is_system")
+    user_attributes = api.sdk.all_user_attributes(fields="id,name,is_system")
     # Filtrujemy już w Pythonie obiekty z is_system == False
     filtered_ua = [ua for ua in user_attributes if not ua.is_system]
     raw_data["user_attributes"] = serialize_looker_obj(filtered_ua)
     
     for ua in filtered_ua:
         try:
-            ua_group_vals = sdk.all_user_attribute_group_values(user_attribute_id=ua.id)
+            ua_group_vals = api.sdk.all_user_attribute_group_values(user_attribute_id=ua.id)
             raw_data["user_attribute_group_values"][ua.id] = serialize_looker_obj(ua_group_vals)
         except Exception as e:
             pass
 
     # 6. Folders and Folder Accesses
     logger.info("Pobieranie Folderów i ich Uprawnień...")
-    folders = sdk.all_folders(fields="id,name,content_metadata_id")
+    folders = api.sdk.all_folders(fields="id,name,content_metadata_id")
     raw_data["folders"] = serialize_looker_obj(folders)
     
     for folder in folders:
         # Pomiń foldery bez metadata_id
         if folder.content_metadata_id:
             try:
-                accesses = sdk.all_content_metadata_accesses(content_metadata_id=folder.content_metadata_id)
+                accesses = api.sdk.all_content_metadata_accesses(content_metadata_id=folder.content_metadata_id)
                 if accesses:
                     raw_data["folder_accesses"][folder.id] = serialize_looker_obj(accesses)
             except Exception as e:
