@@ -47,7 +47,7 @@ def extract_raw_data(target_model_name: str):
 
     # 1. Models and Explores
     logger.info("Pobieranie modeli (Models)...")
-    models = sdk.all_lookml_models()
+    models = sdk.all_lookml_models(fields="name,explores")
     
     if target_model_name != "all":
         target_models = [m for m in models if m.name == target_model_name]
@@ -66,7 +66,8 @@ def extract_raw_data(target_model_name: str):
             try:
                 explore_details = sdk.lookml_model_explore(
                     lookml_model_name=model.name,
-                    explore_name=explore.name
+                    explore_name=explore.name,
+                    fields="name,model_name,required_access_grants"
                 )
                 model_explores.append(serialize_looker_obj(explore_details))
             except Exception as e:
@@ -93,7 +94,7 @@ def extract_raw_data(target_model_name: str):
 
     # 3. Dashboards
     logger.info("Pobieranie Dashboardów...")
-    dashboards = sdk.all_dashboards(fields="id,title,folder,dashboard_elements(query(model,view),result_maker(query(model,view)))")
+    dashboards = sdk.all_dashboards(fields="id,title,folder_id")
     # Zoptymalizuj zapis - zrzucamy tylko te, które się pojawiły w modelu (lub wszystkie)
     if target_model_name != "all":
         sa_dash_ids = {str(d.get("dashboard.id")) for d in raw_data["system_activity_dashboards"]}
@@ -104,7 +105,7 @@ def extract_raw_data(target_model_name: str):
 
     # 4. Users, Groups, Roles
     logger.info("Pobieranie Użytkowników, Grup i Ról...")
-    raw_data["users"] = serialize_looker_obj(sdk.all_users())
+    raw_data["users"] = serialize_looker_obj(sdk.all_users(fields="id,email,display_name,group_ids,role_ids"))
     raw_data["groups"] = serialize_looker_obj(sdk.all_groups())
     
     roles = sdk.all_roles()
