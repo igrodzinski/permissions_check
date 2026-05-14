@@ -30,15 +30,11 @@ def extract_raw_data(target_model_name: str):
             "target_model": target_model_name
         },
         "users": [],
-        "roles": [],
         "groups": [],
-        "role_groups": {},
         "models": [],
         "explores": {},
         "dashboards": [],
         "system_activity_dashboards": [],
-        "model_sets": [],
-        "permission_sets": [],
         "folders": [],
         "folder_accesses": {},
         "user_attributes": [],
@@ -103,41 +99,28 @@ def extract_raw_data(target_model_name: str):
     else:
         raw_data["dashboards"] = serialize_looker_obj(dashboards)
 
-    # 4. Users, Groups, Roles
-    logger.info("Pobieranie Użytkowników, Grup i Ról...")
+    # 4. Users and Groups
+    logger.info("Pobieranie Użytkowników i Grup...")
     raw_data["users"] = serialize_looker_obj(sdk.all_users(fields="id,email,display_name,group_ids,role_ids"))
-    raw_data["groups"] = serialize_looker_obj(sdk.all_groups())
-    
-    roles = sdk.all_roles()
-    raw_data["roles"] = serialize_looker_obj(roles)
-    
-    logger.info("Pobieranie relacji Role -> Group...")
-    for role in roles:
-        try:
-            r_groups = sdk.role_groups(role_id=role.id)
-            raw_data["role_groups"][role.id] = serialize_looker_obj(r_groups)
-        except Exception as e:
-            logger.warning(f"Błąd podczas pobierania grup dla roli {role.id}: {e}")
+    raw_data["groups"] = serialize_looker_obj(sdk.all_groups(fields="id,name"))
 
-    # 5. Security (Model Sets, Permission Sets, User Attributes)
-    logger.info("Pobieranie Zestawów Modeli, Uprawnień i Atrybutów Użytkownika...")
-    raw_data["model_sets"] = serialize_looker_obj(sdk.all_model_sets())
-    raw_data["permission_sets"] = serialize_looker_obj(sdk.all_permission_sets())
+    # 5. Access Grants Mapping (User Attributes)
+    logger.info("Pobieranie Atrybutów Użytkownika dla Access Grants...")
+    user_attributes = sdk.all_user_attributes(fields="id,name,is_system")
+    # Filtrujemy już w Pythonie obiekty z is_system == False
+    filtered_ua = [ua for ua in user_attributes if not ua.is_system]
+    raw_data["user_attributes"] = serialize_looker_obj(filtered_ua)
     
-    user_attributes = sdk.all_user_attributes()
-    raw_data["user_attributes"] = serialize_looker_obj(user_attributes)
-    
-    for ua in user_attributes:
-        if not ua.is_system:
-            try:
-                ua_group_vals = sdk.all_user_attribute_group_values(user_attribute_id=ua.id)
-                raw_data["user_attribute_group_values"][ua.id] = serialize_looker_obj(ua_group_vals)
-            except Exception as e:
-                pass
+    for ua in filtered_ua:
+        try:
+            ua_group_vals = sdk.all_user_attribute_group_values(user_attribute_id=ua.id)
+            raw_data["user_attribute_group_values"][ua.id] = serialize_looker_obj(ua_group_vals)
+        except Exception as e:
+            pass
 
     # 6. Folders and Folder Accesses
     logger.info("Pobieranie Folderów i ich Uprawnień...")
-    folders = sdk.all_folders()
+    folders = sdk.all_folders(fields="id,name,content_metadata_id")
     raw_data["folders"] = serialize_looker_obj(folders)
     
     for folder in folders:
