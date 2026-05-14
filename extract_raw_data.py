@@ -104,17 +104,20 @@ def extract_raw_data(target_model_name: str):
 
     # 5. Access Grants Mapping (User Attributes)
     logger.info("Pobieranie Atrybutów Użytkownika dla Access Grants...")
-    user_attributes = api.sdk.all_user_attributes(fields="id,name,is_system")
-    # Filtrujemy już w Pythonie obiekty z is_system == False
-    filtered_ua = [ua for ua in user_attributes if not ua.is_system]
-    raw_data["user_attributes"] = serialize_looker_obj(filtered_ua)
-    
-    for ua in filtered_ua:
-        try:
-            ua_group_vals = api.sdk.all_user_attribute_group_values(user_attribute_id=ua.id)
-            raw_data["user_attribute_group_values"][ua.id] = serialize_looker_obj(ua_group_vals)
-        except Exception as e:
-            pass
+    try:
+        user_attributes = api.sdk.all_user_attributes()
+        # Filtrujemy już w Pythonie obiekty z is_system == False i zapisujemy tylko potrzebne pola
+        filtered_ua = [{"id": ua.id, "name": ua.name} for ua in user_attributes if not getattr(ua, 'is_system', False)]
+        raw_data["user_attributes"] = filtered_ua
+        
+        for ua_dict in filtered_ua:
+            try:
+                ua_group_vals = api.sdk.all_user_attribute_group_values(user_attribute_id=ua_dict["id"])
+                raw_data["user_attribute_group_values"][ua_dict["id"]] = serialize_looker_obj(ua_group_vals)
+            except Exception as e:
+                pass
+    except Exception as e:
+        logger.warning(f"Błąd podczas pobierania User Attributes: {e}")
 
     # 6. Folders and Folder Accesses
     logger.info("Pobieranie Folderów i ich Uprawnień...")
