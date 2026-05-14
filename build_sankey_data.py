@@ -118,17 +118,27 @@ def build_sankey(input_file: str, output_file: str, include_users: bool, target_
     # 4. (Opcjonalnie) Użytkownicy -> dołączani tylko do przypisanych wcześniej grup
     if include_users:
         logger.info("Dołączam użytkowników do wykresu Sankey...")
-        for u in raw_data.get("users", []):
-            u_group_ids = [str(g_id) for g_id in u.get("group_ids", [])]
-            # Sprawdź, czy użytkownik ma grupę, która bierze udział w przepływie
-            intersecting_groups = used_groups.intersection(u_group_ids)
-            if intersecting_groups:
-                u_id = str(u.get("id"))
-                u_name = u.get("display_name") or u.get("email") or f"User {u_id}"
-                u_idx = get_node_index(f"user_{u_id}", u_name, "user")
+        
+        # Słownik szybkiego dostępu do użytkowników
+        users_dict = {str(u.get("id")): u for u in raw_data.get("users", [])}
+        
+        # Pobieramy relację Grupa -> Lista User ID
+        group_users_map = raw_data.get("group_users", {})
+        if not group_users_map:
+            logger.warning("Uwaga: Słownik group_users jest pusty! Musisz wygenerować dane na nowo najnowszą wersją skryptu extract_raw_data.py.")
+        
+        for g_id in used_groups:
+            g_idx = node_indices.get(f"group_{g_id}")
+            if g_idx is None:
+                continue
                 
-                for g_id in intersecting_groups:
-                    g_idx = node_indices[f"group_{g_id}"]
+            u_ids = group_users_map.get(str(g_id), [])
+            for u_id in u_ids:
+                u = users_dict.get(u_id)
+                if u:
+                    u_name = u.get("display_name") or u.get("email") or f"User {u_id}"
+                    u_idx = get_node_index(f"user_{u_id}", u_name, "user")
+                    
                     # Link Group -> User
                     add_link(g_idx, u_idx)
 

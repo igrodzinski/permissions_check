@@ -35,6 +35,7 @@ def extract_raw_data(target_model_name: str):
         "system_activity_dashboards": [],
         "folders": [],
         "folder_accesses": {},
+        "group_users": {},
         "user_attributes": [],
         "user_attribute_group_values": {}
     }
@@ -99,8 +100,20 @@ def extract_raw_data(target_model_name: str):
 
     # 4. Users and Groups
     logger.info("Pobieranie Użytkowników i Grup...")
-    raw_data["users"] = serialize_looker_obj(api.sdk.all_users(fields="id,email,display_name,group_ids,role_ids"))
-    raw_data["groups"] = serialize_looker_obj(api.sdk.all_groups(fields="id,name"))
+    raw_data["users"] = serialize_looker_obj(api.sdk.all_users(fields="id,email,display_name"))
+    
+    groups_response = api.sdk.all_groups(fields="id,name")
+    raw_data["groups"] = serialize_looker_obj(groups_response)
+    
+    logger.info("Mapowanie przypisań użytkowników do grup...")
+    raw_data["group_users"] = {}
+    for g in groups_response:
+        try:
+            g_users = api.sdk.all_group_users(group_id=g.id)
+            if g_users:
+                raw_data["group_users"][str(g.id)] = [str(getattr(u, 'id', u.get('id') if isinstance(u, dict) else None)) for u in g_users]
+        except Exception as e:
+            logger.warning(f"Błąd all_group_users dla grupy {g.id}: {e}")
 
     # 5. Access Grants Mapping (User Attributes)
     logger.info("Pobieranie Atrybutów Użytkownika dla Access Grants...")
