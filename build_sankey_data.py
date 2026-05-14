@@ -150,7 +150,10 @@ if __name__ == "__main__":
     parser.add_argument("--input", default="raw_looker_data.json", help="Ścieżka do pliku wejściowego (domyślnie raw_looker_data.json)")
     parser.add_argument("--output", default="sankey_data.json", help="Ścieżka do zapisu (domyślnie sankey_data.json)")
     parser.add_argument("--include_users", action="store_true", help="Dodaje na końcu strumienie łączące Grupy z poszczególnymi Użytkownikami")
-    parser.add_argument("--models", nargs="+", help="Filtruj wygenerowany wykres Sankeya dla wybranych modeli (np. --models model1 model2)")
-    args = parser.parse_args()
+    parser.add_argument("--models", "--model", dest="models", nargs="+", help="Filtruj wygenerowany wykres Sankeya dla wybranych modeli (np. --models model1 model2)")
+    
+    # Obsługa błędu Jupyter Notebook (gdy sys.argv zawiera np. -f)
+    import sys
+    args, unknown = parser.parse_known_args()
 
     build_sankey(args.input, args.output, args.include_users, args.models)
