@@ -59,13 +59,16 @@ def build_sankey(
 
     # Lookup: Dashboard id -> [{model, explore}]
     dash_to_explores = {}
+    # Lookup odwrotny: "model::explore" -> czy ma jakikolwiek dashboard w datasecie
+    explore_has_dashboard = set()
     for sa in raw_data.get("system_activity_dashboards", []):
         if not isinstance(sa, dict): continue
         d_id = str(sa.get("dashboard.id"))
-        dash_to_explores.setdefault(d_id, []).append({
-            "model": sa.get("query.model"),
-            "explore": sa.get("query.view")
-        })
+        m    = sa.get("query.model")
+        e    = sa.get("query.view")
+        dash_to_explores.setdefault(d_id, []).append({"model": m, "explore": e})
+        if m and e:
+            explore_has_dashboard.add(f"{m}::{e}")
 
     # Normalizacja filtrów do lowercase sets dla case-insensitive matching
     filter_models    = {m.lower() for m in target_models}    if target_models    else None
@@ -138,16 +141,27 @@ def build_sankey(
                 add_link(m_idx, e_idx)
                 add_link(e_idx, dash_idx)
 
-        # -- Ścieżka bez dashboardu: Model -> Explore -> Wariant (gdy brak dashboardu) --
+        # -- Ścieżka bez dashboardu: Model -> Explore -> Wariant --
+        # Rysowana TYLKO gdy dana Eksploracja faktycznie nie ma żadnego dashboardu
+        # w całym datasecie (nie mylić z dashboardem, który nie przeszedł filtra!)
         for explore_key in perms.get("explores", []):
             try:
                 m_name, e_name_str = explore_key.split("::")
             except ValueError:
                 continue
 
+            # Pomiń jeśli ta exploracja ma dashboardy – w takim przypadku
+            # link pokaże się przez ścieżkę pełną; tu nie chcemy duplikatów
+            # ani węzłów niezwiązanych z aktywnym filtrem
+            if explore_key in explore_has_dashboard:
+                continue
+
             if filter_models and m_name.lower() not in filter_models:
                 continue
             if filter_explores and e_name_str.lower() not in filter_explores:
+                continue
+            # Jeśli filtrujemy po dashboardzie, pomijamy fallback (nie ma tu dashboardu)
+            if filter_dashboards:
                 continue
 
             m_idx = get_node_index(f"model_{m_name}", m_name, "model")
