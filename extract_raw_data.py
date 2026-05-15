@@ -339,10 +339,10 @@ def extract_raw_data(target_model_name: str):
     # Dla folderow zachowujemy parent_id=None (serialize_looker_obj pomija None)
     raw_data["folders"] = [
         {
-            "id": str(f.id) if f.id is not None else None,
-            "name": f.name,
-            "parent_id": str(f.parent_id) if f.parent_id is not None else None,
-            "content_metadata_id": f.content_metadata_id
+            "id": str(getattr(f, "id", None)) if getattr(f, "id", None) is not None else None,
+            "name": getattr(f, "name", ""),
+            "parent_id": str(getattr(f, "parent_id", None)) if getattr(f, "parent_id", None) is not None else None,
+            "content_metadata_id": getattr(f, "content_metadata_id", None)
         }
         for f in folders
     ]
