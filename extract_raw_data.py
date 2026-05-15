@@ -34,18 +34,49 @@ def process_permissions(raw_data: dict) -> dict:
         "conversional analytics agent manager"  # oba warianty literowki
     }
 
-    # Foldery użytkowników (do wykluczenia)
+    # Identyfikacja folderów współdzielonych (Shared/System)
     all_folders = {str(f.get("id")): f for f in raw_data.get("folders", []) if isinstance(f, dict)}
     
-    user_folder_ids = set()
-    for fid, f in all_folders.items():
-        # Looker API udostępnia flagi is_personal i is_personal_descendant
-        # Jeśli ich nie ma (stare API), sprawdzamy czy nazwa zaczyna się od 'Users' dla root'a, ale
-        # bezpieczniej polegać na flagach. Wszelkie foldery personalne wykluczamy.
-        if f.get("is_personal") or f.get("is_personal_descendant"):
-            user_folder_ids.add(fid)
+    shared_folder_ids = set()
+    has_flags = any("is_personal" in f for f in all_folders.values())
+    has_parent_id = any(f.get("parent_id") not in (None, "", "None") for f in all_folders.values())
+    
+    if has_flags:
+        logger.info("Wykryto flagi 'is_personal'. Buduję whitelistę folderów współdzielonych...")
+        for fid, f in all_folders.items():
+            if not f.get("is_personal") and not f.get("is_personal_descendant"):
+                shared_folder_ids.add(fid)
+    elif has_parent_id:
+        logger.info("Brak flag 'is_personal'. Buduję drzewo 'Shared' na podstawie 'parent_id'...")
+        shared_root_ids = {
+            fid for fid, f in all_folders.items()
+            if str(f.get("name", "")).lower() in ("shared", "shared folders")
+        }
+        
+        def get_subtree(root_ids, folder_map):
+            result = set(root_ids)
+            added = True
+            while added:
+                added = False
+                for fid, f in folder_map.items():
+                    pid = str(f.get("parent_id") or "")
+                    if pid in result and fid not in result:
+                        result.add(fid)
+                        added = True
+            return result
             
-    logger.info(f"Rozpoznano {len(user_folder_ids)} folderów osobistych użytkowników (zostaną wykluczone).")
+        shared_folder_ids = get_subtree(shared_root_ids, all_folders)
+    else:
+        logger.warning("Brak flag 'is_personal' oraz brak 'parent_id'. Uruchamiam tryb awaryjny (Fallback)...")
+        for fid, f in all_folders.items():
+            name = str(f.get("name", "")).lower()
+            if name not in ("users", "personal"):
+                shared_folder_ids.add(fid)
+
+    # Dozwolonym "folderem" jest również LookML
+    shared_folder_ids.add("lookml")
+
+    logger.info(f"Rozpoznano {len(shared_folder_ids)} bezpiecznych folderów (współdzielone/LookML).")
 
     # 1. Mapowania pomocnicze
     role_to_models = {}
@@ -70,8 +101,9 @@ def process_permissions(raw_data: dict) -> dict:
         d_id = str(sa.get("dashboard.id"))
         d_folder = str(sa.get("dashboard.folder_id"))
         key = f"{m}::{e}"
-        # Filtr: pomijamy dashboardy, które znajdują się w folderach użytkowników
-        if d_folder in user_folder_ids:
+        # Filtr: tylko dashboardy w dozwolonych, współdzielonych folderach.
+        # Odcina to w szczególności dashboardy w folderach personalnych, które w ogóle nie zostały zwrócone przez API!
+        if d_folder not in shared_folder_ids:
             continue
         if key not in explore_to_dashboards:
             explore_to_dashboards[key] = []
