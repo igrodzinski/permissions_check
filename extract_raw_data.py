@@ -29,9 +29,13 @@ def process_permissions(raw_data: dict) -> dict:
     # 1. Mapowania pomocnicze
     role_to_models = {}
     for role_id, role in roles_dict.items():
-        ms_id = str(role.get("model_set_id"))
+        # Looker API Role objcet usually has 'model_set' dictionary inline
+        model_set_data = role.get("model_set", {})
+        ms_id = str(model_set_data.get("id") or role.get("model_set_id"))
+        
         ms = model_sets_dict.get(ms_id, {})
-        role_to_models[role_id] = ms.get("models", [])
+        # Model set models can be inline in the role, or found in the model_sets_dict
+        role_to_models[role_id] = model_set_data.get("models") or ms.get("models", [])
         
     model_to_explores = {}
     for model_name, explores in raw_data.get("explores", {}).items():
@@ -307,20 +311,47 @@ def extract_raw_data(target_model_name: str):
             except Exception as e:
                 pass
 
-    # Aplikowanie pre-kalkulacji uprawnień
-    logger.info("Przetwarzanie i aplikowanie mapy uprawnień...")
-    raw_data = process_permissions(raw_data)
-
     # Zapis do pliku
     output_filename = "raw_looker_data.json"
     logger.info(f"Zapisywanie danych do pliku: {output_filename} ...")
     with open(output_filename, "w", encoding="utf-8") as f:
         json.dump(raw_data, f, ensure_ascii=False, indent=2)
-    logger.info("Pomyślnie zapisano surowe dane (wraz z permissions)!")
+    logger.info("Pomyślnie zapisano surowe dane do pliku raw_looker_data.json!")
+
+def run_processing_only():
+    input_file = "raw_looker_data.json"
+    output_file = "permissions_looker_data.json"
+    
+    logger.info(f"Wczytywanie pliku {input_file}...")
+    try:
+        with open(input_file, "r", encoding="utf-8") as f:
+            raw_data = json.load(f)
+    except FileNotFoundError:
+        logger.error(f"Nie znaleziono pliku {input_file}. Uruchom skrypt najpierw z flagą --extract.")
+        return
+        
+    logger.info("Przetwarzanie i kalkulowanie mapy uprawnień...")
+    processed_data = process_permissions(raw_data)
+    
+    logger.info(f"Zapisywanie przetworzonych danych do {output_file}...")
+    with open(output_file, "w", encoding="utf-8") as f:
+        json.dump(processed_data, f, ensure_ascii=False, indent=2)
+    logger.info("Zakończono sukcesem!")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Looker Raw Data Extractor")
-    parser.add_argument("--model", default="all", help="Nazwa konkretnego modelu do ograniczenia ekstrakcji (domyślnie 'all' czyli pobiera całą instancję).")
+    parser = argparse.ArgumentParser(description="Looker Data Extractor & Permission Processor")
+    parser.add_argument("--model", default="all", help="Nazwa modelu do ekstrakcji (domyślnie 'all').")
+    parser.add_argument("--extract", action="store_true", help="Pobiera dane na nowo z Lookera i zapisuje jako raw_looker_data.json.")
+    parser.add_argument("--process", action="store_true", help="Odpala obliczenia uprawnień na istniejącym pliku raw_looker_data.json bez łączenia z Lookerem.")
     args = parser.parse_args()
 
-    extract_raw_data(args.model)
+    if not args.extract and not args.process:
+        # Default behavior if nothing specified
+        logger.info("Nie podano flag, uruchamiam domyślnie tylko wyliczanie z pliku (--process).")
+        args.process = True
+
+    if args.extract:
+        extract_raw_data(args.model)
+        
+    if args.process:
+        run_processing_only()
