@@ -1,169 +1,157 @@
 import json
-import argparse
 import logging
+import argparse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def build_sankey(input_file: str, output_file: str, include_users: bool, target_models: list = None):
+def build_sankey(input_file: str, output_file: str, target_type: str = "user", target_models: list = None):
+    """
+    Buduje strukturę nodes/links pod wykres Sankey (Plotly).
+    target_type: "user", "group", "role"
+    """
+    logger.info(f"Rozpoczynam budowę danych Sankey z pliku: {input_file} (Typ docelowy: {target_type})")
     try:
         with open(input_file, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
     except FileNotFoundError:
-        logger.error(f"Plik {input_file} nie istnieje. Najpierw wygeneruj go przez skrypt extract_raw_data.py")
+        logger.error(f"Nie znaleziono pliku {input_file}! Uruchom extract_raw_data.py najpierw.")
         return
 
     nodes = []
     links = []
+    
     node_indices = {}
-
-    def get_node_index(n_id: str, label: str, n_type: str) -> int:
-        if n_id not in node_indices:
-            idx = len(nodes)
+    current_idx = 0
+    
+    # helper
+    def get_node_index(node_id: str, label: str, type_str: str) -> int:
+        nonlocal current_idx
+        if node_id not in node_indices:
+            node_indices[node_id] = current_idx
             nodes.append({
-                "id": n_id,
+                "id": node_id,
                 "label": label,
-                "type": n_type
+                "type": type_str
             })
-            node_indices[n_id] = idx
-        return node_indices[n_id]
-
+            current_idx += 1
+        return node_indices[node_id]
+        
     def add_link(source_idx: int, target_idx: int, value: int = 1):
-        # Prevent duplicate links
-        for link in links:
-            if link["source"] == source_idx and link["target"] == target_idx:
+        for l in links:
+            if l["source"] == source_idx and l["target"] == target_idx:
+                l["value"] += value
                 return
         links.append({"source": source_idx, "target": target_idx, "value": value})
 
-    # Dictionaries for quick lookup
-    groups_dict = {str(g.get("id")): g.get("name", f"Group {g.get('id')}") for g in raw_data.get("groups", [])}
-    
-    # Przetwarzanie Dashboardów do słownika, by szybko pobierać ich folder_id
-    dash_to_folder = {}
-    dash_names = {}
+    # 1. Master lookups for Dashboards & Explores
+    dash_details = {}
     for d in raw_data.get("dashboards", []):
-        d_id = str(d.get("id"))
-        
-        # Ochrona przed rzutowaniem None na string "None"
-        f_id = d.get("folder_id") or d.get("folder", {}).get("id")
-        if f_id:
-            dash_to_folder[d_id] = str(f_id)
+        if isinstance(d, dict):
+            dash_details[str(d.get("id"))] = d.get("title", f"Dash {d.get('id')}")
             
-        dash_names[d_id] = d.get("title", f"Dash {d_id}")
-        
-    # Słownik dostępów folderów
-    folder_to_groups = {}
-    for folder_id, accesses in raw_data.get("folder_accesses", {}).items():
-        folder_to_groups[str(folder_id)] = [str(a.get("group_id")) for a in accesses if a.get("group_id")]
+    dash_to_explores = {}
+    for sa in raw_data.get("system_activity_dashboards", []):
+        if not isinstance(sa, dict): continue
+        d_id = str(sa.get("dashboard.id"))
+        if d_id not in dash_to_explores:
+            dash_to_explores[d_id] = []
+        dash_to_explores[d_id].append({
+            "model": sa.get("query.model"),
+            "explore": sa.get("query.view")
+        })
 
-    used_groups = set()
+    # 2. Iteracja po wybranym wariancie docelowym
+    target_list_name = f"{target_type}s" # "user" -> "users"
+    target_list = raw_data.get(target_list_name, [])
+    
+    if not target_list:
+        logger.warning(f"Brak danych dla encji: {target_list_name}")
+        return
 
-    # 1. Models & Explores
-    for model in raw_data.get("models", []):
-        model_name = model.get("name")
+    for entity in target_list:
+        if not isinstance(entity, dict): continue
         
-        # Filtrowanie po wybranych modelach
-        if target_models and model_name not in target_models:
+        # Ominięcie systemowych grup
+        if target_type == "group" and str(entity.get("name", "")).startswith("4"):
             continue
             
-        model_idx = get_node_index(f"model_{model_name}", model_name, "model")
+        e_id = str(entity.get("id"))
+        e_name = entity.get("name") or entity.get("display_name") or entity.get("email") or f"{target_type.capitalize()} {e_id}"
         
-        # Pobieramy explores dla danego modelu ze słownika `explores` lub `model.explores`
-        model_explores = raw_data.get("explores", {}).get(model_name, [])
-        for explore in model_explores:
-            explore_name = explore.get("name")
-            explore_id = f"explore_{model_name}_{explore_name}"
-            explore_idx = get_node_index(explore_id, explore_name, "explore")
-            
-            # Link Model -> Explore
-            add_link(model_idx, explore_idx)
-
-    # 2. System Activity -> łączymy Explores z Dashboardami
-    for sa_row in raw_data.get("system_activity_dashboards", []):
-        model_name = sa_row.get("query.model")
-        view_name = sa_row.get("query.view")
-        dash_id = str(sa_row.get("dashboard.id", ""))
-        
-        if not model_name or not view_name or not dash_id:
+        perms = entity.get("permissions", {})
+        if not perms:
             continue
             
-        explore_id = f"explore_{model_name}_{view_name}"
-        if explore_id in node_indices:
-            explore_idx = node_indices[explore_id]
+        # Opcja 1: Pełna ścieżka do dashboardów: Model -> Explore -> Dashboard -> Wariant
+        for d_id in perms.get("dashboards", []):
+            dash_explores = dash_to_explores.get(str(d_id), [])
             
-            d_title = dash_names.get(dash_id, sa_row.get("dashboard.title", f"Dash {dash_id}"))
-            
-            d_folder = dash_to_folder.get(dash_id)
-            if not d_folder:
-                sa_folder = sa_row.get("dashboard.folder_id")
-                d_folder = str(sa_folder) if sa_folder else ""
+            # Filtrowanie modeli jeśli podano
+            if target_models:
+                dash_explores = [x for x in dash_explores if x["model"] in target_models]
                 
-            dash_node_id = f"dash_{dash_id}"
-            dash_idx = get_node_index(dash_node_id, d_title, "dashboard")
-            
-            # Link Explore -> Dashboard
-            add_link(explore_idx, dash_idx)
-            
-            # 3. Z Dashboardu (przez folder) -> Do Grupy
-            if d_folder and d_folder in folder_to_groups:
-                for group_id in folder_to_groups[d_folder]:
-                    g_name = groups_dict.get(group_id, f"Group {group_id}")
-                    g_node_id = f"group_{group_id}"
-                    g_idx = get_node_index(g_node_id, g_name, "group")
-                    
-                    # Link Dashboard -> Group
-                    add_link(dash_idx, g_idx)
-                    used_groups.add(group_id)
-
-    # 4. (Opcjonalnie) Użytkownicy -> dołączani tylko do przypisanych wcześniej grup
-    if include_users:
-        logger.info("Dołączam użytkowników do wykresu Sankey...")
-        
-        # Słownik szybkiego dostępu do użytkowników
-        users_dict = {str(u.get("id")): u for u in raw_data.get("users", [])}
-        
-        # Pobieramy relację Grupa -> Lista User ID
-        group_users_map = raw_data.get("group_users", {})
-        if not group_users_map:
-            logger.warning("Uwaga: Słownik group_users jest pusty! Musisz wygenerować dane na nowo najnowszą wersją skryptu extract_raw_data.py.")
-        
-        for g_id in used_groups:
-            g_idx = node_indices.get(f"group_{g_id}")
-            if g_idx is None:
+            if not dash_explores: 
                 continue
                 
-            u_ids = group_users_map.get(str(g_id), [])
-            for u_id in u_ids:
-                u = users_dict.get(u_id)
-                if u:
-                    u_name = u.get("display_name") or u.get("email") or f"User {u_id}"
-                    u_idx = get_node_index(f"user_{u_id}", u_name, "user")
-                    
-                    # Link Group -> User
-                    add_link(g_idx, u_idx)
+            # Wariant Node
+            ent_idx = get_node_index(f"{target_type}_{e_id}", e_name, target_type)
+            
+            # Dash Node
+            d_title = dash_details.get(str(d_id), f"Dashboard {d_id}")
+            dash_idx = get_node_index(f"dash_{d_id}", d_title, "dashboard")
+            
+            # Link Dashboard -> Wariant
+            add_link(dash_idx, ent_idx)
+            
+            for ex in dash_explores:
+                m_name = ex["model"]
+                e_name_str = ex["explore"]
+                
+                m_idx = get_node_index(f"model_{m_name}", m_name, "model")
+                e_idx = get_node_index(f"explore_{m_name}_{e_name_str}", e_name_str, "explore")
+                
+                add_link(m_idx, e_idx)
+                add_link(e_idx, dash_idx)
+                
+        # Opcja 2 (Opcjonalna dla kompletności): Jeśli wariant ma dostęp do Explore, ale nie ma z tego dashboardu
+        # Pokażemy wtedy ścieżkę Explore -> Wariant.
+        for explore_key in perms.get("explores", []):
+            try:
+                m_name, e_name_str = explore_key.split("::")
+            except ValueError:
+                continue
+                
+            if target_models and m_name not in target_models:
+                continue
+                
+            m_idx = get_node_index(f"model_{m_name}", m_name, "model")
+            e_idx = get_node_index(f"explore_{m_name}_{e_name_str}", e_name_str, "explore")
+            ent_idx = get_node_index(f"{target_type}_{e_id}", e_name, target_type)
+            
+            add_link(m_idx, e_idx)
+            # Rysujemy bezpośrednie wejście do Exploracji by widzieć pełen zakres dostępu do danych
+            add_link(e_idx, ent_idx)
 
-    # Przygotowanie wyjścia i optymalizacja JSON (oczyszczenie z węzłów, które nigdzie nie prowadzą? W sumie sankey sobie poradzi, ale dla czystości można by to zrobić).
-    # Zostawmy, ponieważ build mapuje z góry do dołu.
-    
-    sankey_data = {
+    # 3. Zapis
+    output_data = {
         "nodes": nodes,
         "links": links
     }
-
+    
     with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(sankey_data, f, ensure_ascii=False, indent=2)
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
         
     logger.info(f"Gotowe! Zapisano dane Sankey do {output_file} (Węzłów: {len(nodes)}, Krawędzi: {len(links)})")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Builder danych do wykresu Sankey na podstawie surowego pliku Lookera")
-    parser.add_argument("--input", default="raw_looker_data.json", help="Ścieżka do pliku wejściowego (domyślnie raw_looker_data.json)")
+    parser = argparse.ArgumentParser(description="Builder danych do wykresu Sankey")
+    parser.add_argument("--input", default="permissions_looker_data.json", help="Ścieżka do pliku (domyślnie permissions_looker_data.json)")
     parser.add_argument("--output", default="sankey_data.json", help="Ścieżka do zapisu (domyślnie sankey_data.json)")
-    parser.add_argument("--include_users", action="store_true", help="Dodaje na końcu strumienie łączące Grupy z poszczególnymi Użytkownikami")
-    parser.add_argument("--models", "--model", dest="models", nargs="+", help="Filtruj wygenerowany wykres Sankeya dla wybranych modeli (np. --models model1 model2)")
+    parser.add_argument("--type", choices=["user", "group", "role"], default="user", help="Zakończenie strumieni (domyślnie 'user')")
+    parser.add_argument("--models", "--model", dest="models", nargs="+", help="Filtruj wygenerowany wykres dla wybranych modeli")
     
-    # Obsługa błędu Jupyter Notebook (gdy sys.argv zawiera np. -f)
     import sys
     args, unknown = parser.parse_known_args()
 
-    build_sankey(args.input, args.output, args.include_users, args.models)
+    build_sankey(args.input, args.output, args.type, args.models)
