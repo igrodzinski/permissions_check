@@ -26,58 +26,6 @@ def process_permissions(raw_data: dict) -> dict:
     roles_dict = {str(r.get("id")): r for r in raw_data.get("roles", []) if isinstance(r, dict)}
     model_sets_dict = {str(ms.get("id")): ms for ms in raw_data.get("model_sets", []) if isinstance(ms, dict)}
     
-    # === Filtry stale ===
-    # Role do pominiecia (brak granularnych uprawnien)
-    EXCLUDED_ROLE_NAMES = {
-        "admin", "user", "developer", "viewer", "gemini",
-        "conversional analytics user", "conversiona analytics agent manager",
-        "conversional analytics agent manager"  # oba warianty literowki
-    }
-
-    # Identyfikacja folderów współdzielonych (Shared/System)
-    all_folders = {str(f.get("id")): f for f in raw_data.get("folders", []) if isinstance(f, dict)}
-    
-    shared_folder_ids = set()
-    has_flags = any("is_personal" in f for f in all_folders.values())
-    has_parent_id = any(f.get("parent_id") not in (None, "", "None") for f in all_folders.values())
-    
-    if has_flags:
-        logger.info("Wykryto flagi 'is_personal'. Buduję whitelistę folderów współdzielonych...")
-        for fid, f in all_folders.items():
-            if not f.get("is_personal") and not f.get("is_personal_descendant"):
-                shared_folder_ids.add(fid)
-    elif has_parent_id:
-        logger.info("Brak flag 'is_personal'. Buduję drzewo 'Shared' na podstawie 'parent_id'...")
-        shared_root_ids = {
-            fid for fid, f in all_folders.items()
-            if str(f.get("name", "")).lower() in ("shared", "shared folders")
-        }
-        
-        def get_subtree(root_ids, folder_map):
-            result = set(root_ids)
-            added = True
-            while added:
-                added = False
-                for fid, f in folder_map.items():
-                    pid = str(f.get("parent_id") or "")
-                    if pid in result and fid not in result:
-                        result.add(fid)
-                        added = True
-            return result
-            
-        shared_folder_ids = get_subtree(shared_root_ids, all_folders)
-    else:
-        logger.warning("Brak flag 'is_personal' oraz brak 'parent_id'. Uruchamiam tryb awaryjny (Fallback)...")
-        for fid, f in all_folders.items():
-            name = str(f.get("name", "")).lower()
-            if name not in ("users", "personal"):
-                shared_folder_ids.add(fid)
-
-    # Dozwolonym "folderem" jest również LookML
-    shared_folder_ids.add("lookml")
-
-    logger.info(f"Rozpoznano {len(shared_folder_ids)} bezpiecznych folderów (współdzielone/LookML).")
-
     # 1. Mapowania pomocnicze
     role_to_models = {}
     for role_id, role in roles_dict.items():
@@ -101,10 +49,6 @@ def process_permissions(raw_data: dict) -> dict:
         d_id = str(sa.get("dashboard.id"))
         d_folder = str(sa.get("dashboard.folder_id"))
         key = f"{m}::{e}"
-        # Filtr: tylko dashboardy w dozwolonych, współdzielonych folderach.
-        # Odcina to w szczególności dashboardy w folderach personalnych, które w ogóle nie zostały zwrócone przez API!
-        if d_folder not in shared_folder_ids:
-            continue
         if key not in explore_to_dashboards:
             explore_to_dashboards[key] = []
         explore_to_dashboards[key].append({"id": d_id, "folder_id": d_folder})
@@ -133,14 +77,10 @@ def process_permissions(raw_data: dict) -> dict:
                 user_to_groups[u_id] = set()
             user_to_groups[u_id].add(g_id)
 
-    # 2. Rola -> permissions (pomijamy wykluczone role)
+    # 2. Rola -> permissions
     for role in raw_data.get("roles", []):
         if not isinstance(role, dict): continue
         r_id = str(role.get("id"))
-        r_name = str(role.get("name", "")).strip().lower()
-        if r_name in EXCLUDED_ROLE_NAMES:
-            role["permissions"] = {"models": [], "explores": [], "dashboards": [], "excluded": True}
-            continue
         perms = {"models": set(), "explores": set(), "dashboards": set()}
         models = role_to_models.get(r_id, [])
         perms["models"].update(models)
@@ -165,10 +105,6 @@ def process_permissions(raw_data: dict) -> dict:
         perms = {"models": set(), "explores": set(), "dashboards": set()}
         r_ids = group_to_roles.get(g_id, set())
         for r_id in r_ids:
-            # Pomin wykluczone role
-            role_obj = roles_dict.get(r_id, {})
-            if str(role_obj.get("name", "")).strip().lower() in EXCLUDED_ROLE_NAMES:
-                continue
             models = role_to_models.get(r_id, [])
             perms["models"].update(models)
             for m in models:
@@ -196,10 +132,6 @@ def process_permissions(raw_data: dict) -> dict:
             u_roles.update(group_to_roles.get(g_id, set()))
             
         for r_id in u_roles:
-            # Pomin wykluczone role
-            role_obj = roles_dict.get(r_id, {})
-            if str(role_obj.get("name", "")).strip().lower() in EXCLUDED_ROLE_NAMES:
-                continue
             models = role_to_models.get(r_id, [])
             perms["models"].update(models)
             for m in models:
