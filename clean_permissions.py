@@ -24,15 +24,15 @@ def clean_permissions_json(input_filepath="permissions_looker_data.json", output
     # 2. Identyfikacja folderów do zachowania (Shared)
     all_folders = {str(f.get("id")): f for f in data.get("folders", []) if isinstance(f, dict)}
     
-    user_folder_ids = set()
+    shared_folder_ids = set()
     # Sprawdzamy czy API Lookera wypluło nowe flagi (is_personal)
     has_flags = any("is_personal" in f for f in all_folders.values())
     
     if has_flags:
-        print("Wykryto flagi 'is_personal' w pliku. Wykluczam foldery użytkowników...")
+        print("Wykryto flagi 'is_personal' w pliku. Wybieram tylko foldery współdzielone (System/Shared)...")
         for fid, f in all_folders.items():
-            if f.get("is_personal") or f.get("is_personal_descendant"):
-                user_folder_ids.add(fid)
+            if not f.get("is_personal") and not f.get("is_personal_descendant"):
+                shared_folder_ids.add(fid)
     else:
         print("Brak flag 'is_personal'. Buduję drzewo 'Shared' na podstawie 'parent_id'...")
         shared_root_ids = {
@@ -53,20 +53,21 @@ def clean_permissions_json(input_filepath="permissions_looker_data.json", output
             return result
             
         shared_folder_ids = get_subtree(shared_root_ids, all_folders)
-        
-        # Wszystko co NIE jest w Shared wykluczamy
-        for fid in all_folders:
-            if fid not in shared_folder_ids:
-                user_folder_ids.add(fid)
 
-    print(f"Folderów do wykluczenia (użytkowników/nie-Shared): {len(user_folder_ids)}")
+    # Explicitly allow LookML dashboards which have folder_id "lookml"
+    shared_folder_ids.add("lookml")
+
+    print(f"Ilość folderów uznanych za bezpieczne (Shared/LookML): {len(shared_folder_ids)}")
 
     # 3. Zbieramy identyfikatory dozwolonych dashboardów
     allowed_dashboards = set()
     for sa in data.get("system_activity_dashboards", []):
         d_id = str(sa.get("dashboard.id"))
         d_folder = str(sa.get("dashboard.folder_id"))
-        if d_folder not in user_folder_ids:
+        
+        # Zmieniona logika - dopuszczamy TYLKO dashboardy z potwierdzonych folderów Shared.
+        # Odcina to dashboardy w folderach personalnych, które w ogóle nie zostały zwrócone przez API!
+        if d_folder in shared_folder_ids:
             allowed_dashboards.add(d_id)
 
     print(f"Zidentyfikowano {len(allowed_dashboards)} dashboardów w obszarze Shared.")
