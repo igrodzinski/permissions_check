@@ -112,13 +112,10 @@ def process_permissions(raw_data: dict) -> dict:
                 for e in explores:
                     perms["explores"].add(f"{m}::{e}")
                     
-        # Dashboardy ze zgodnością folderów
-        allowed_folders = group_to_folders.get(g_id, set())
+        # Dashboardy - wszystkie zbudowane na dozwolonych eksploracjach
         for explore_key in perms["explores"]:
-            dashboards = explore_to_dashboards.get(explore_key, [])
-            for d in dashboards:
-                if d["folder_id"] in allowed_folders:
-                    perms["dashboards"].add(d["id"])
+            for d in explore_to_dashboards.get(explore_key, []):
+                perms["dashboards"].add(d["id"])
                     
         group["permissions"] = {k: list(v) for k, v in perms.items()}
 
@@ -142,15 +139,10 @@ def process_permissions(raw_data: dict) -> dict:
                 for e in explores:
                     perms["explores"].add(f"{m}::{e}")
                     
-        u_folders = set()
-        for g_id in u_groups:
-            u_folders.update(group_to_folders.get(g_id, set()))
-            
+        # Dashboardy - wszystkie zbudowane na dozwolonych eksploracjach
         for explore_key in perms["explores"]:
-            dashboards = explore_to_dashboards.get(explore_key, [])
-            for d in dashboards:
-                if d["folder_id"] in u_folders:
-                    perms["dashboards"].add(d["id"])
+            for d in explore_to_dashboards.get(explore_key, []):
+                perms["dashboards"].add(d["id"])
                     
         user["permissions"] = {k: list(v) for k, v in perms.items()}
 
