@@ -71,16 +71,30 @@ def clean_permissions_json(input_filepath="permissions_looker_data.json", output
 
     # 3. Zbieramy identyfikatory dozwolonych dashboardów
     allowed_dashboards = set()
+    
+    # Źródło 1: Zwykłe dashboardy
+    for d in data.get("dashboards", []):
+        if not isinstance(d, dict): continue
+        d_id = str(d.get("id"))
+        d_folder = str(d.get("folder_id"))
+        if d_folder in shared_folder_ids:
+            allowed_dashboards.add(d_id)
+            
+    # Źródło 2: System Activity Dashboards
     for sa in data.get("system_activity_dashboards", []):
+        if not isinstance(sa, dict): continue
         d_id = str(sa.get("dashboard.id"))
         d_folder = str(sa.get("dashboard.folder_id"))
-        
-        # Zmieniona logika - dopuszczamy TYLKO dashboardy z potwierdzonych folderów Shared.
-        # Odcina to dashboardy w folderach personalnych, które w ogóle nie zostały zwrócone przez API!
         if d_folder in shared_folder_ids:
             allowed_dashboards.add(d_id)
 
-    print(f"Zidentyfikowano {len(allowed_dashboards)} dashboardów w obszarze Shared.")
+    print(f"Zidentyfikowano {len(allowed_dashboards)} dozwolonych dashboardów w obszarze Shared/LookML.")
+    if len(allowed_dashboards) == 0:
+        print("UWAGA: Nie znaleziono żadnego dozwolonego dashboardu! To zepsuje wykres.")
+        print(f"Przykładowe id folderów w shared_folder_ids (max 10): {list(shared_folder_ids)[:10]}")
+        # Wydrukuj przykładowy folder z system activity
+        sample_d = next(iter(data.get("system_activity_dashboards", [])), {})
+        print(f"Przykładowy dashboard z System Activity: id={sample_d.get('dashboard.id')}, folder_id={sample_d.get('dashboard.folder_id')}")
 
     # 4. Wyczyszczenie uprawnień encji w pliku
     for entity_type in ["roles", "groups", "users"]:
