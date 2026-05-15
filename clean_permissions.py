@@ -27,13 +27,14 @@ def clean_permissions_json(input_filepath="permissions_looker_data.json", output
     shared_folder_ids = set()
     # Sprawdzamy czy API Lookera wypluło nowe flagi (is_personal)
     has_flags = any("is_personal" in f for f in all_folders.values())
+    has_parent_id = any(f.get("parent_id") not in (None, "", "None") for f in all_folders.values())
     
     if has_flags:
         print("Wykryto flagi 'is_personal' w pliku. Wybieram tylko foldery współdzielone (System/Shared)...")
         for fid, f in all_folders.items():
             if not f.get("is_personal") and not f.get("is_personal_descendant"):
                 shared_folder_ids.add(fid)
-    else:
+    elif has_parent_id:
         print("Brak flag 'is_personal'. Buduję drzewo 'Shared' na podstawie 'parent_id'...")
         shared_root_ids = {
             fid for fid, f in all_folders.items()
@@ -53,6 +54,15 @@ def clean_permissions_json(input_filepath="permissions_looker_data.json", output
             return result
             
         shared_folder_ids = get_subtree(shared_root_ids, all_folders)
+    else:
+        print("UWAGA: Brak flag 'is_personal' oraz brak 'parent_id'. Uruchamiam tryb awaryjny (Fallback)...")
+        # Jeśli nie mamy struktury drzewa, dopuszczamy wszystkie jawnie widoczne foldery
+        # (ponieważ większość ukrytych folderów personalnych i tak nie trafia do all_folders).
+        # Wykluczamy jedynie foldery, które wprost nazywają się "Users" lub "Personal".
+        for fid, f in all_folders.items():
+            name = str(f.get("name", "")).lower()
+            if name not in ("users", "personal"):
+                shared_folder_ids.add(fid)
 
     # Explicitly allow LookML dashboards which have folder_id "lookml"
     shared_folder_ids.add("lookml")
