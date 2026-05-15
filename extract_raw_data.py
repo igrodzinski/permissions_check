@@ -257,14 +257,22 @@ def extract_raw_data(target_model_name: str):
 
     # 3. Dashboards
     logger.info("Pobieranie Dashboardów...")
-    dashboards = api.sdk.all_dashboards(fields="id,title,folder_id")
+    # Pobieramy również zagnieżdżony obiekt folder, żeby wyciągnąć is_personal i parent_id
+    dashboards = api.sdk.all_dashboards(fields="id,title,folder_id,folder(id,name,parent_id,is_personal,is_personal_descendant,content_metadata_id)")
     # Zoptymalizuj zapis - zrzucamy tylko te, które się pojawiły w modelu (lub wszystkie)
     if target_model_name != "all":
         sa_dash_ids = {str(d.get("dashboard.id")) for d in raw_data["system_activity_dashboards"]}
         filtered_dashboards = [d for d in dashboards if str(d.id) in sa_dash_ids]
         raw_data["dashboards"] = serialize_looker_obj(filtered_dashboards)
     else:
+        filtered_dashboards = dashboards
         raw_data["dashboards"] = serialize_looker_obj(dashboards)
+        
+    # Wyciągnijmy foldery zaszyte w dashboardach - często to jedyny sposób na zobaczenie prywatnych folderów innych
+    dash_folders = {}
+    for d in filtered_dashboards:
+        if d.folder and d.folder.id:
+            dash_folders[str(d.folder.id)] = d.folder
 
     # 4. Users, Groups, Roles and Model Sets
     logger.info("Pobieranie Użytkowników, Grup, Ról i Model Sets...")
@@ -326,7 +334,14 @@ def extract_raw_data(target_model_name: str):
 
     # 6. Folders and Folder Accesses
     logger.info("Pobieranie Folderów i ich Uprawnień...")
-    folders = api.sdk.all_folders(fields="id,name,is_personal,is_personal_descendant,content_metadata_id")
+    folders = api.sdk.all_folders(fields="id,name,is_personal,is_personal_descendant,content_metadata_id,parent_id")
+    
+    # Dodajemy do listy również foldery wyciągnięte z dashboardów (o ile ich nie ma)
+    all_extracted_folders = {str(f.id): f for f in folders if f.id is not None}
+    for fid, f in dash_folders.items():
+        if fid not in all_extracted_folders:
+            all_extracted_folders[fid] = f
+            
     # Zapisujemy informacje o tym czy folder jest osobisty
     raw_data["folders"] = [
         {
@@ -334,14 +349,15 @@ def extract_raw_data(target_model_name: str):
             "name": getattr(f, "name", ""),
             "is_personal": getattr(f, "is_personal", False),
             "is_personal_descendant": getattr(f, "is_personal_descendant", False),
+            "parent_id": str(getattr(f, "parent_id", None)) if getattr(f, "parent_id", None) is not None else None,
             "content_metadata_id": getattr(f, "content_metadata_id", None)
         }
-        for f in folders
+        for f in all_extracted_folders.values()
     ]
     
-    for folder in folders:
+    for folder in all_extracted_folders.values():
         # Pomiń foldery bez metadata_id
-        if folder.content_metadata_id:
+        if getattr(folder, "content_metadata_id", None):
             try:
                 accesses = api.sdk.all_content_metadata_accesses(content_metadata_id=folder.content_metadata_id)
                 if accesses:
