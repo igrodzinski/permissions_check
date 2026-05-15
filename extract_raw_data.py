@@ -34,27 +34,18 @@ def process_permissions(raw_data: dict) -> dict:
         "conversional analytics agent manager"  # oba warianty literowki
     }
 
-    # Foldery "Shared" i ich podfoldery
+    # Foldery użytkowników (do wykluczenia)
     all_folders = {str(f.get("id")): f for f in raw_data.get("folders", []) if isinstance(f, dict)}
-    # Znajdz ID folderu o nazwie "Shared" (lub "Shared Folders")
-    shared_root_ids = {
-        fid for fid, f in all_folders.items()
-        if str(f.get("name", "")).lower() in ("shared", "shared folders")
-    }
-    # Rekurencyjnie zbierz wszystkie podfoldery
-    def get_subtree(root_ids, folder_map):
-        result = set(root_ids)
-        added = True
-        while added:
-            added = False
-            for fid, f in folder_map.items():
-                pid = str(f.get("parent_id") or "")
-                if pid in result and fid not in result:
-                    result.add(fid)
-                    added = True
-        return result
-    shared_folder_ids = get_subtree(shared_root_ids, all_folders)
-    logger.info(f"Foldery w drzewie 'Shared': {len(shared_folder_ids)}")
+    
+    user_folder_ids = set()
+    for fid, f in all_folders.items():
+        # Looker API udostępnia flagi is_personal i is_personal_descendant
+        # Jeśli ich nie ma (stare API), sprawdzamy czy nazwa zaczyna się od 'Users' dla root'a, ale
+        # bezpieczniej polegać na flagach. Wszelkie foldery personalne wykluczamy.
+        if f.get("is_personal") or f.get("is_personal_descendant"):
+            user_folder_ids.add(fid)
+            
+    logger.info(f"Rozpoznano {len(user_folder_ids)} folderów osobistych użytkowników (zostaną wykluczone).")
 
     # 1. Mapowania pomocnicze
     role_to_models = {}
@@ -79,8 +70,8 @@ def process_permissions(raw_data: dict) -> dict:
         d_id = str(sa.get("dashboard.id"))
         d_folder = str(sa.get("dashboard.folder_id"))
         key = f"{m}::{e}"
-        # Filtr: tylko dashboardy w folderze Shared lub jego podfolderach
-        if shared_folder_ids and d_folder not in shared_folder_ids:
+        # Filtr: pomijamy dashboardy, które znajdują się w folderach użytkowników
+        if d_folder in user_folder_ids:
             continue
         if key not in explore_to_dashboards:
             explore_to_dashboards[key] = []
@@ -335,13 +326,14 @@ def extract_raw_data(target_model_name: str):
 
     # 6. Folders and Folder Accesses
     logger.info("Pobieranie Folderów i ich Uprawnień...")
-    folders = api.sdk.all_folders(fields="id,name,parent_id,content_metadata_id")
-    # Dla folderow zachowujemy parent_id=None (serialize_looker_obj pomija None)
+    folders = api.sdk.all_folders(fields="id,name,is_personal,is_personal_descendant,content_metadata_id")
+    # Zapisujemy informacje o tym czy folder jest osobisty
     raw_data["folders"] = [
         {
             "id": str(getattr(f, "id", None)) if getattr(f, "id", None) is not None else None,
             "name": getattr(f, "name", ""),
-            "parent_id": str(getattr(f, "parent_id", None)) if getattr(f, "parent_id", None) is not None else None,
+            "is_personal": getattr(f, "is_personal", False),
+            "is_personal_descendant": getattr(f, "is_personal_descendant", False),
             "content_metadata_id": getattr(f, "content_metadata_id", None)
         }
         for f in folders
