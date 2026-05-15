@@ -10,20 +10,24 @@ def build_sankey(
     output_file: str,
     target_type: str = "user",
     target_models: list = None,
-    target_entities: list = None,   # Filtr po nazwie/emailu usera, grupy lub roli
-    target_explores: list = None,   # Filtr po nazwie exploracji
-    target_dashboards: list = None  # Filtr po tytule dashboardu
+    target_entities: list = None,
+    target_explores: list = None,
+    target_dashboards: list = None
 ):
     """
     Buduje strukturę nodes/links pod wykres Sankey (Plotly).
 
-    target_type        : "user", "group" lub "role"
-    target_models      : lista nazw modeli (None = wszystkie)
-    target_entities    : lista nazw/emaili encji końcowych (None = wszystkie)
-    target_explores    : lista nazw eksploracji (None = wszystkie)
-    target_dashboards  : lista tytułów dashboardów (None = wszystkie)
+    Logika przepływu:
+      Model -> Explore -> Dashboard -> Entity (user/group/role)
+
+    Połączenie jest rysowane TYLKO wtedy gdy:
+      1. Dashboard jest w liście permissions.dashboards encji (dostęp przez folder)
+      2. Eksploracja buduje ten dashboard (system_activity_dashboards)
+      3. Eksploracja jest w liście permissions.explores encji (dostęp przez rolę/model_set)
+
+    Wszystkie 3 warunki muszą być spełnione jednocześnie.
     """
-    logger.info(f"Rozpoczynam budowę danych Sankey z pliku: {input_file} (Typ docelowy: {target_type})")
+    logger.info(f"Budowanie Sankey: plik={input_file}, typ={target_type}")
     try:
         with open(input_file, "r", encoding="utf-8") as f:
             raw_data = json.load(f)
@@ -51,43 +55,39 @@ def build_sankey(
                 return
         links.append({"source": source_idx, "target": target_idx, "value": value})
 
-    # 1. Lookup: Dashboard id -> title
-    dash_details = {}
+    # --- Lookups ---
+    # Dashboard id -> title
+    dash_title = {}
     for d in raw_data.get("dashboards", []):
         if isinstance(d, dict):
-            dash_details[str(d.get("id"))] = d.get("title", f"Dash {d.get('id')}")
+            dash_title[str(d.get("id"))] = d.get("title", f"Dash {d.get('id')}")
 
-    # Lookup: Dashboard id -> [{model, explore}]
-    dash_to_explores = {}
-    # Lookup odwrotny: "model::explore" -> czy ma jakikolwiek dashboard w datasecie
-    explore_has_dashboard = set()
+    # Dashboard id -> set of "model::explore" keys (jakie exploracje go budują)
+    dash_to_explore_keys = {}
     for sa in raw_data.get("system_activity_dashboards", []):
         if not isinstance(sa, dict): continue
         d_id = str(sa.get("dashboard.id"))
-        m    = sa.get("query.model")
-        e    = sa.get("query.view")
-        dash_to_explores.setdefault(d_id, []).append({"model": m, "explore": e})
+        m = sa.get("query.model")
+        e = sa.get("query.view")
         if m and e:
-            explore_has_dashboard.add(f"{m}::{e}")
+            dash_to_explore_keys.setdefault(d_id, set()).add(f"{m}::{e}")
 
-    # Normalizacja filtrów do lowercase sets dla case-insensitive matching
-    filter_models    = {m.lower() for m in target_models}    if target_models    else None
-    filter_entities  = {e.lower() for e in target_entities}  if target_entities  else None
-    filter_explores  = {e.lower() for e in target_explores}  if target_explores  else None
-    filter_dashboards = {d.lower() for d in target_dashboards} if target_dashboards else None
+    # --- Normalizacja filtrów (case-insensitive) ---
+    filter_models     = {x.lower() for x in target_models}     if target_models     else None
+    filter_entities   = {x.lower() for x in target_entities}   if target_entities   else None
+    filter_explores   = {x.lower() for x in target_explores}   if target_explores   else None
+    filter_dashboards = {x.lower() for x in target_dashboards} if target_dashboards else None
 
-    # 2. Iteracja po wybranej encji
-    target_list_name = f"{target_type}s"
-    target_list = raw_data.get(target_list_name, [])
-
+    # --- Główna pętla po encjach ---
+    target_list = raw_data.get(f"{target_type}s", [])
     if not target_list:
-        logger.warning(f"Brak danych dla encji: {target_list_name}")
+        logger.warning(f"Brak danych dla encji: {target_type}s")
         return
 
     for entity in target_list:
         if not isinstance(entity, dict): continue
 
-        # Pomijanie systemowych grup zaczynających się od "4"
+        # Pomiń systemowe grupy
         if target_type == "group" and str(entity.get("name", "")).startswith("4"):
             continue
 
@@ -99,7 +99,7 @@ def build_sankey(
             or f"{target_type.capitalize()} {e_id}"
         )
 
-        # Filtr po encji docelowej (user/group/role)
+        # Filtr po encji
         if filter_entities and e_name.lower() not in filter_entities:
             continue
 
@@ -107,89 +107,75 @@ def build_sankey(
         if not perms:
             continue
 
-        ent_idx = get_node_index(f"{target_type}_{e_id}", e_name, target_type)
+        # Precalculated explore keys dla tej encji: "model::explore"
+        entity_explore_keys = set(perms.get("explores", []))
+        entity_dash_ids     = set(str(x) for x in perms.get("dashboards", []))
 
-        # -- Ścieżka pełna: Model -> Explore -> Dashboard -> Wariant --
-        for d_id in perms.get("dashboards", []):
-            d_title = dash_details.get(str(d_id), f"Dashboard {d_id}")
+        ent_idx = None  # tworzymy węzeł encji dopiero gdy mamy coś do połączenia
 
-            # Filtr po tytule dashboardu
-            if filter_dashboards and d_title.lower() not in filter_dashboards:
+        for d_id in entity_dash_ids:
+            d_title_str = dash_title.get(d_id, f"Dashboard {d_id}")
+
+            # Filtr po dashboardzie
+            if filter_dashboards and d_title_str.lower() not in filter_dashboards:
                 continue
 
-            dash_explores = dash_to_explores.get(str(d_id), [])
+            # Kluczowy INTERSECT:
+            # Eksploracje budujące dashboard ∩ eksploracje, do których encja ma dostęp
+            all_dash_explores = dash_to_explore_keys.get(d_id, set())
+            accessible_explores = entity_explore_keys & all_dash_explores
 
-            # Filtr po modelu
-            if filter_models:
-                dash_explores = [x for x in dash_explores if x["model"] and x["model"].lower() in filter_models]
-
-            # Filtr po eksploracji
-            if filter_explores:
-                dash_explores = [x for x in dash_explores if x["explore"] and x["explore"].lower() in filter_explores]
-
-            if not dash_explores:
+            if not accessible_explores:
                 continue
 
-            dash_idx = get_node_index(f"dash_{d_id}", d_title, "dashboard")
+            # Filtrowanie po modelu / exploracji (opcjonalne filtry użytkownika)
+            filtered_explores = set()
+            for key in accessible_explores:
+                m_name, e_name_str = key.split("::", 1)
+                if filter_models and m_name.lower() not in filter_models:
+                    continue
+                if filter_explores and e_name_str.lower() not in filter_explores:
+                    continue
+                filtered_explores.add(key)
+
+            if not filtered_explores:
+                continue
+
+            # Tworzymy węzeł encji przy pierwszym rzeczywistym połączeniu
+            if ent_idx is None:
+                ent_idx = get_node_index(f"{target_type}_{e_id}", e_name, target_type)
+
+            dash_idx = get_node_index(f"dash_{d_id}", d_title_str, "dashboard")
             add_link(dash_idx, ent_idx)
 
-            for ex in dash_explores:
-                m_name    = ex["model"]
-                e_name_str = ex["explore"]
+            for key in filtered_explores:
+                m_name, e_name_str = key.split("::", 1)
                 m_idx = get_node_index(f"model_{m_name}", m_name, "model")
                 e_idx = get_node_index(f"explore_{m_name}_{e_name_str}", e_name_str, "explore")
                 add_link(m_idx, e_idx)
                 add_link(e_idx, dash_idx)
 
-        # -- Ścieżka bez dashboardu: Model -> Explore -> Wariant --
-        # Rysowana TYLKO gdy dana Eksploracja faktycznie nie ma żadnego dashboardu
-        # w całym datasecie (nie mylić z dashboardem, który nie przeszedł filtra!)
-        for explore_key in perms.get("explores", []):
-            try:
-                m_name, e_name_str = explore_key.split("::")
-            except ValueError:
-                continue
-
-            # Pomiń jeśli ta exploracja ma dashboardy – w takim przypadku
-            # link pokaże się przez ścieżkę pełną; tu nie chcemy duplikatów
-            # ani węzłów niezwiązanych z aktywnym filtrem
-            if explore_key in explore_has_dashboard:
-                continue
-
-            if filter_models and m_name.lower() not in filter_models:
-                continue
-            if filter_explores and e_name_str.lower() not in filter_explores:
-                continue
-            # Jeśli filtrujemy po dashboardzie, pomijamy fallback (nie ma tu dashboardu)
-            if filter_dashboards:
-                continue
-
-            m_idx = get_node_index(f"model_{m_name}", m_name, "model")
-            e_idx = get_node_index(f"explore_{m_name}_{e_name_str}", e_name_str, "explore")
-            add_link(m_idx, e_idx)
-            add_link(e_idx, ent_idx)
-
-    # 3. Zapis
+    # --- Zapis ---
     output_data = {"nodes": nodes, "links": links}
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(output_data, f, ensure_ascii=False, indent=2)
 
-    logger.info(f"Gotowe! Zapisano dane Sankey do {output_file} (Węzłów: {len(nodes)}, Krawędzi: {len(links)})")
+    logger.info(f"Gotowe! Zapisano {output_file} (Węzłów: {len(nodes)}, Krawędzi: {len(links)})")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Builder danych do wykresu Sankey")
-    parser.add_argument("--input",      default="permissions_looker_data.json")
-    parser.add_argument("--output",     default="sankey_data.json")
-    parser.add_argument("--type",       choices=["user", "group", "role"], default="user",
-                        help="Typ encji docelowej: 'user', 'group' lub 'role' (domyślnie 'user')")
-    parser.add_argument("--models",     "--model",     dest="models",     nargs="+",
+    parser.add_argument("--input",       default="permissions_looker_data.json")
+    parser.add_argument("--output",      default="sankey_data.json")
+    parser.add_argument("--type",        choices=["user", "group", "role"], default="user",
+                        help="Typ encji: 'user', 'group' lub 'role'")
+    parser.add_argument("--models",      "--model",     dest="models",     nargs="+",
                         help="Filtruj po nazwach modeli")
-    parser.add_argument("--entities",   "--entity",    dest="entities",   nargs="+",
-                        help="Filtruj po nazwach/emailach encji docelowych (user/group/role)")
-    parser.add_argument("--explores",   "--explore",   dest="explores",   nargs="+",
+    parser.add_argument("--entities",    "--entity",    dest="entities",   nargs="+",
+                        help="Filtruj po nazwach/emailach encji (user/group/role)")
+    parser.add_argument("--explores",    "--explore",   dest="explores",   nargs="+",
                         help="Filtruj po nazwach eksploracji")
-    parser.add_argument("--dashboards", "--dashboard", dest="dashboards", nargs="+",
+    parser.add_argument("--dashboards",  "--dashboard", dest="dashboards", nargs="+",
                         help="Filtruj po tytułach dashboardów")
 
     import sys
