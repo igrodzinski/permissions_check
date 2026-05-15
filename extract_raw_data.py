@@ -21,6 +21,137 @@ def serialize_looker_obj(obj: Any) -> Any:
     else:
         return obj
 
+def process_permissions(raw_data: dict) -> dict:
+    """Prekalkuluje logikę dostępową i wstrzyknie słownik permissions do ról, grup i userów."""
+    roles_dict = {str(r.get("id")): r for r in raw_data.get("roles", []) if isinstance(r, dict)}
+    model_sets_dict = {str(ms.get("id")): ms for ms in raw_data.get("model_sets", []) if isinstance(ms, dict)}
+    
+    # 1. Mapowania pomocnicze
+    role_to_models = {}
+    for role_id, role in roles_dict.items():
+        ms_id = str(role.get("model_set_id"))
+        ms = model_sets_dict.get(ms_id, {})
+        role_to_models[role_id] = ms.get("models", [])
+        
+    model_to_explores = {}
+    for model_name, explores in raw_data.get("explores", {}).items():
+        model_to_explores[model_name] = [e.get("name") for e in explores if isinstance(e, dict)]
+        
+    explore_to_dashboards = {}
+    for sa in raw_data.get("system_activity_dashboards", []):
+        if not isinstance(sa, dict): continue
+        m = sa.get("query.model")
+        e = sa.get("query.view")
+        d_id = str(sa.get("dashboard.id"))
+        d_folder = str(sa.get("dashboard.folder_id"))
+        key = f"{m}::{e}"
+        if key not in explore_to_dashboards:
+            explore_to_dashboards[key] = []
+        explore_to_dashboards[key].append({"id": d_id, "folder_id": d_folder})
+        
+    group_to_folders = {}
+    for folder_id, accesses in raw_data.get("folder_accesses", {}).items():
+        for acc in accesses:
+            g_id = str(acc.get("group_id"))
+            if g_id not in group_to_folders:
+                group_to_folders[g_id] = set()
+            group_to_folders[g_id].add(str(folder_id))
+            
+    group_to_roles = {}
+    for role_id, r_groups in raw_data.get("role_groups", {}).items():
+        for g in r_groups:
+            g_id = str(g.get("group_id"))
+            if g_id not in group_to_roles:
+                group_to_roles[g_id] = set()
+            group_to_roles[g_id].add(role_id)
+            
+    user_to_groups = {}
+    for g_id, users in raw_data.get("group_users", {}).items():
+        for u_id in users:
+            u_id = str(u_id)
+            if u_id not in user_to_groups:
+                user_to_groups[u_id] = set()
+            user_to_groups[u_id].add(g_id)
+
+    # 2. Rola -> permissions
+    for role in raw_data.get("roles", []):
+        if not isinstance(role, dict): continue
+        r_id = str(role.get("id"))
+        perms = {"models": set(), "explores": set(), "dashboards": set()}
+        models = role_to_models.get(r_id, [])
+        perms["models"].update(models)
+        for m in models:
+            explores = model_to_explores.get(m, [])
+            for e in explores:
+                perms["explores"].add(f"{m}::{e}")
+                dashboards = explore_to_dashboards.get(f"{m}::{e}", [])
+                for d in dashboards:
+                    perms["dashboards"].add(d["id"])
+        role["permissions"] = {k: list(v) for k, v in perms.items()}
+
+    # 3. Grupa -> permissions
+    for group in raw_data.get("groups", []):
+        if not isinstance(group, dict): continue
+        g_id = str(group.get("id"))
+        g_name = group.get("name", "")
+        # Pomijanie grup zaczynających się od 4 (zgodnie z prośbą)
+        if str(g_name).startswith("4"):
+            continue
+            
+        perms = {"models": set(), "explores": set(), "dashboards": set()}
+        r_ids = group_to_roles.get(g_id, set())
+        for r_id in r_ids:
+            models = role_to_models.get(r_id, [])
+            perms["models"].update(models)
+            for m in models:
+                explores = model_to_explores.get(m, [])
+                for e in explores:
+                    perms["explores"].add(f"{m}::{e}")
+                    
+        # Dashboardy ze zgodnością folderów
+        allowed_folders = group_to_folders.get(g_id, set())
+        for explore_key in perms["explores"]:
+            dashboards = explore_to_dashboards.get(explore_key, [])
+            for d in dashboards:
+                if d["folder_id"] in allowed_folders:
+                    perms["dashboards"].add(d["id"])
+                    
+        group["permissions"] = {k: list(v) for k, v in perms.items()}
+
+    # 4. User -> permissions
+    for user in raw_data.get("users", []):
+        if not isinstance(user, dict): continue
+        u_id = str(user.get("id"))
+        perms = {"models": set(), "explores": set(), "dashboards": set()}
+        
+        u_roles = set([str(r) for r in user.get("role_ids", [])])
+        u_groups = user_to_groups.get(u_id, set())
+        
+        for g_id in u_groups:
+            u_roles.update(group_to_roles.get(g_id, set()))
+            
+        for r_id in u_roles:
+            models = role_to_models.get(r_id, [])
+            perms["models"].update(models)
+            for m in models:
+                explores = model_to_explores.get(m, [])
+                for e in explores:
+                    perms["explores"].add(f"{m}::{e}")
+                    
+        u_folders = set()
+        for g_id in u_groups:
+            u_folders.update(group_to_folders.get(g_id, set()))
+            
+        for explore_key in perms["explores"]:
+            dashboards = explore_to_dashboards.get(explore_key, [])
+            for d in dashboards:
+                if d["folder_id"] in u_folders:
+                    perms["dashboards"].add(d["id"])
+                    
+        user["permissions"] = {k: list(v) for k, v in perms.items()}
+
+    return raw_data
+
 def extract_raw_data(target_model_name: str):
     logger.info("Inicjalizacja przez zewnętrzny plik api...")
     
@@ -176,12 +307,16 @@ def extract_raw_data(target_model_name: str):
             except Exception as e:
                 pass
 
+    # Aplikowanie pre-kalkulacji uprawnień
+    logger.info("Przetwarzanie i aplikowanie mapy uprawnień...")
+    raw_data = process_permissions(raw_data)
+
     # Zapis do pliku
     output_filename = "raw_looker_data.json"
     logger.info(f"Zapisywanie danych do pliku: {output_filename} ...")
     with open(output_filename, "w", encoding="utf-8") as f:
         json.dump(raw_data, f, ensure_ascii=False, indent=2)
-    logger.info("Pomyślnie zapisano surowe dane!")
+    logger.info("Pomyślnie zapisano surowe dane (wraz z permissions)!")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Looker Raw Data Extractor")
