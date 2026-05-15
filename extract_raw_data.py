@@ -29,6 +29,9 @@ def extract_raw_data(target_model_name: str):
             "target_model": target_model_name
         },
         "users": [],
+        "roles": [],
+        "role_groups": {},
+        "model_sets": [],
         "groups": [],
         "models": [],
         "explores": {},
@@ -38,7 +41,8 @@ def extract_raw_data(target_model_name: str):
         "folder_accesses": {},
         "group_users": {},
         "user_attributes": [],
-        "user_attribute_group_values": {}
+        "user_attribute_group_values": {},
+        "user_attribute_user_values": {}
     }
 
     # 1. Models and Explores
@@ -99,9 +103,22 @@ def extract_raw_data(target_model_name: str):
     else:
         raw_data["dashboards"] = serialize_looker_obj(dashboards)
 
-    # 4. Users and Groups
-    logger.info("Pobieranie Użytkowników i Grup...")
-    raw_data["users"] = serialize_looker_obj(api.sdk.all_users(fields="id,email,display_name"))
+    # 4. Users, Groups, Roles and Model Sets
+    logger.info("Pobieranie Użytkowników, Grup, Ról i Model Sets...")
+    raw_data["users"] = serialize_looker_obj(api.sdk.all_users(fields="id,email,display_name,group_ids,role_ids"))
+    
+    roles = api.sdk.all_roles()
+    raw_data["roles"] = serialize_looker_obj(roles)
+    
+    logger.info("Pobieranie relacji Role -> Group...")
+    for role in roles:
+        try:
+            r_groups = api.sdk.role_groups(role_id=role.id)
+            raw_data["role_groups"][str(role.id)] = serialize_looker_obj(r_groups)
+        except Exception as e:
+            pass
+            
+    raw_data["model_sets"] = serialize_looker_obj(api.sdk.all_model_sets())
     
     groups_response = api.sdk.all_groups(fields="id,name")
     raw_data["groups"] = serialize_looker_obj(groups_response)
@@ -124,12 +141,23 @@ def extract_raw_data(target_model_name: str):
         filtered_ua = [{"id": ua.id, "name": ua.name} for ua in user_attributes if not getattr(ua, 'is_system', False)]
         raw_data["user_attributes"] = filtered_ua
         
+        logger.info("Pobieranie wartości User Attributes dla Grup...")
         for ua_dict in filtered_ua:
             try:
                 ua_group_vals = api.sdk.all_user_attribute_group_values(user_attribute_id=ua_dict["id"])
-                raw_data["user_attribute_group_values"][ua_dict["id"]] = serialize_looker_obj(ua_group_vals)
+                raw_data["user_attribute_group_values"][str(ua_dict["id"])] = serialize_looker_obj(ua_group_vals)
             except Exception as e:
                 pass
+                
+        logger.info("Pobieranie wartości User Attributes bezpośrednio dla Użytkowników...")
+        for u in raw_data["users"]:
+            u_id = u.get("id")
+            if u_id:
+                try:
+                    u_vals = api.sdk.user_attribute_user_values(user_id=u_id)
+                    raw_data["user_attribute_user_values"][str(u_id)] = serialize_looker_obj(u_vals)
+                except Exception as e:
+                    pass
     except Exception as e:
         logger.warning(f"Błąd podczas pobierania User Attributes: {e}")
 
