@@ -26,6 +26,36 @@ def process_permissions(raw_data: dict) -> dict:
     roles_dict = {str(r.get("id")): r for r in raw_data.get("roles", []) if isinstance(r, dict)}
     model_sets_dict = {str(ms.get("id")): ms for ms in raw_data.get("model_sets", []) if isinstance(ms, dict)}
     
+    # === Filtry stale ===
+    # Role do pominiecia (brak granularnych uprawnien)
+    EXCLUDED_ROLE_NAMES = {
+        "admin", "user", "developer", "viewer", "gemini",
+        "conversional analytics user", "conversiona analytics agent manager",
+        "conversional analytics agent manager"  # oba warianty literowki
+    }
+
+    # Foldery "Shared" i ich podfoldery
+    all_folders = {str(f.get("id")): f for f in raw_data.get("folders", []) if isinstance(f, dict)}
+    # Znajdz ID folderu o nazwie "Shared" (lub "Shared Folders")
+    shared_root_ids = {
+        fid for fid, f in all_folders.items()
+        if str(f.get("name", "")).lower() in ("shared", "shared folders")
+    }
+    # Rekurencyjnie zbierz wszystkie podfoldery
+    def get_subtree(root_ids, folder_map):
+        result = set(root_ids)
+        added = True
+        while added:
+            added = False
+            for fid, f in folder_map.items():
+                pid = str(f.get("parent_id") or "")
+                if pid in result and fid not in result:
+                    result.add(fid)
+                    added = True
+        return result
+    shared_folder_ids = get_subtree(shared_root_ids, all_folders)
+    logger.info(f"Foldery w drzewie 'Shared': {len(shared_folder_ids)}")
+
     # 1. Mapowania pomocnicze
     role_to_models = {}
     for role_id, role in roles_dict.items():
@@ -49,6 +79,9 @@ def process_permissions(raw_data: dict) -> dict:
         d_id = str(sa.get("dashboard.id"))
         d_folder = str(sa.get("dashboard.folder_id"))
         key = f"{m}::{e}"
+        # Filtr: tylko dashboardy w folderze Shared lub jego podfolderach
+        if shared_folder_ids and d_folder not in shared_folder_ids:
+            continue
         if key not in explore_to_dashboards:
             explore_to_dashboards[key] = []
         explore_to_dashboards[key].append({"id": d_id, "folder_id": d_folder})
@@ -77,10 +110,14 @@ def process_permissions(raw_data: dict) -> dict:
                 user_to_groups[u_id] = set()
             user_to_groups[u_id].add(g_id)
 
-    # 2. Rola -> permissions
+    # 2. Rola -> permissions (pomijamy wykluczone role)
     for role in raw_data.get("roles", []):
         if not isinstance(role, dict): continue
         r_id = str(role.get("id"))
+        r_name = str(role.get("name", "")).strip().lower()
+        if r_name in EXCLUDED_ROLE_NAMES:
+            role["permissions"] = {"models": [], "explores": [], "dashboards": [], "excluded": True}
+            continue
         perms = {"models": set(), "explores": set(), "dashboards": set()}
         models = role_to_models.get(r_id, [])
         perms["models"].update(models)
@@ -105,6 +142,10 @@ def process_permissions(raw_data: dict) -> dict:
         perms = {"models": set(), "explores": set(), "dashboards": set()}
         r_ids = group_to_roles.get(g_id, set())
         for r_id in r_ids:
+            # Pomin wykluczone role
+            role_obj = roles_dict.get(r_id, {})
+            if str(role_obj.get("name", "")).strip().lower() in EXCLUDED_ROLE_NAMES:
+                continue
             models = role_to_models.get(r_id, [])
             perms["models"].update(models)
             for m in models:
@@ -132,6 +173,10 @@ def process_permissions(raw_data: dict) -> dict:
             u_roles.update(group_to_roles.get(g_id, set()))
             
         for r_id in u_roles:
+            # Pomin wykluczone role
+            role_obj = roles_dict.get(r_id, {})
+            if str(role_obj.get("name", "")).strip().lower() in EXCLUDED_ROLE_NAMES:
+                continue
             models = role_to_models.get(r_id, [])
             perms["models"].update(models)
             for m in models:
@@ -290,7 +335,7 @@ def extract_raw_data(target_model_name: str):
 
     # 6. Folders and Folder Accesses
     logger.info("Pobieranie Folderów i ich Uprawnień...")
-    folders = api.sdk.all_folders(fields="id,name,content_metadata_id")
+    folders = api.sdk.all_folders(fields="id,name,parent_id,content_metadata_id")
     raw_data["folders"] = serialize_looker_obj(folders)
     
     for folder in folders:
