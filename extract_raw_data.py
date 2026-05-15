@@ -64,10 +64,10 @@ def process_permissions(raw_data: dict) -> dict:
     group_to_roles = {}
     for role_id, r_groups in raw_data.get("role_groups", {}).items():
         for g in r_groups:
-            g_id = str(g.get("group_id"))
-            if g_id not in group_to_roles:
-                group_to_roles[g_id] = set()
-            group_to_roles[g_id].add(role_id)
+            # Looker API zwraca Group objects z polem 'id', nie 'group_id'
+            g_id = str(g.get("id"))
+            if g_id and g_id != "None":
+                group_to_roles.setdefault(g_id, set()).add(role_id)
             
     user_to_groups = {}
     for g_id, users in raw_data.get("group_users", {}).items():
